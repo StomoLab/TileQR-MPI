@@ -4,6 +4,9 @@ project(TileQR-MPI LANGUAGES CXX)
 # 詳細出力 (icecream-cpp による IC マクロ) の有効/無効。
 option(COUT "Enable detailed trace output via icecream-cpp" OFF)
 
+# 残差チェック (||A - QR||_F / ||A||_F) の有効/無効。
+option(CHECK "Enable residual check after factorization" OFF)
+
 # 単一構成ジェネレータ向けに既定ビルドタイプを設定。
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
@@ -43,4 +46,8 @@ if(COUT)
   FetchContent_MakeAvailable(icecream_cpp)
   target_include_directories(tileqr SYSTEM PRIVATE ${icecream_cpp_SOURCE_DIR})
   target_compile_definitions(tileqr PRIVATE COUT)
+endif()
+
+if(CHECK)
+  target_compile_definitions(tileqr PRIVATE CHECK)
 endif()

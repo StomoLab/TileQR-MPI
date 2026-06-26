@@ -8,11 +8,12 @@ TileQR-MPI is an MPI-parallel implementation of **Tile QR factorization** (タ�
 
 ## Current state
 
-Working distributed Tile QR. The algorithm runs as an **SPMD owner-computes** loop — every rank walks the full task space (`GEQRT` / `LARFB` / `TSQRT` / `SSRFB`) and, for each task it owns (`A.owns(output tile)`), calls the corresponding **PLASMA core kernel** (real `double` arithmetic). Data movement uses **non-blocking `MPI_Isend`/`MPI_Irecv`** (into the per-node panel buffers): `GEQRT`→`LARFB` V/T along the process row, and `TSQRT`/`SSRFB` down the process column (sequentially per `i`) plus the `(i,k)` V/T row-distribution for `SSRFB`; see Architecture. Verified: the R diagonal matches a serial LAPACK `dgeqrf` (magnitudes) and is identical across all process-grid shapes (1×1, 4×1, 2×2, 3×2, 2×3, 6×1, 1×6, 3×3), for square/rectangular inputs and varied `ts`/`ib`, with repeated runs (no timing-dependent races). There are **no automated tests committed yet** (verification is currently manual, comparing R diagonals under `-DCOUT=ON`).
+Working distributed Tile QR. The algorithm runs as an **SPMD owner-computes** loop — every rank walks the full task space (`GEQRT` / `LARFB` / `TSQRT` / `SSRFB`) and, for each task it owns (`A.owns(output tile)`), calls the corresponding **PLASMA core kernel** (real `double` arithmetic). Data movement uses **non-blocking `MPI_Isend`/`MPI_Irecv`** (into the per-node panel buffers): `GEQRT`→`LARFB` V/T along the process row, and `TSQRT`/`SSRFB` down the process column (sequentially per `i`) plus the `(i,k)` V/T row-distribution for `SSRFB`; see Architecture. Verified: a built-in **residual check** (`-DCHECK=ON`) reports `‖A − QR‖_F / ‖A‖_F ≈ 2e-16` across all process-grid shapes (1×1, 4×1, 2×2, 3×2, 2×3, 1×6, 3×3), for square/rectangular and non-tile-divisible inputs and varied `ts`/`ib`; the value is identical across grids (the factored result is distribution-independent). There is **no CTest harness yet** (the check is opt-in at build time).
 
 Files:
 - `tile_matrix.hpp` — header-only distributed-matrix layer (`namespace tileqr`). `ProcessGrid` (P×Q grid, row-major `rank = myrow*Q + mycol`) and `TileMatrix` (descA-equivalent descriptor + node-local tile storage and per-tile T factors in `std::unique_ptr<double[]>`). See "Architecture" below.
 - `main.cpp` — builds a `ProcessGrid` + `TileMatrix`, fills tiles with deterministic data, and runs the factorization with PLASMA kernels + MPI.
+- `residual_check.hpp` — `-DCHECK=ON` only: gathers the original and factored tiles to rank 0 and computes the backward error `‖A − QR‖/‖A‖` (reconstructs `Q·R` with PLASMA `dormqr`/`dtsmqr` in `PlasmaNoTrans`, reverse sweep).
 - `CMakeLists.txt` — CMake build (requires MPI and PLASMA; see Build & run).
 
 ## Build & run
@@ -30,6 +31,8 @@ mpirun -np 4 ./build/tileqr 8 6 2 1 2 2   # args: global_m global_n ts ib [P Q]
 **Dependencies**: MPI and **PLASMA** (expected at `/opt/PLASMA`; override with `-Dplasma_DIR=<dir>/lib/cmake/plasma`). The installed `plasmaConfig.cmake` is empty (defines no targets), so CMake includes `plasmaTargets.cmake` directly to get `plasma::plasma_core_blas`; that target carries the include dir and links **OpenBLAS** (LAPACKE/CBLAS) + libgomp. Only the standalone `plasma_core_d*` kernels are used — no `plasma_init`/runtime. At runtime the PLASMA and OpenBLAS dylibs must be resolvable (they use absolute paths / rpath from the install).
 
 **Output is gated behind the `COUT` flag and off by default.** Configure with `-DCOUT=ON` to enable detailed per-task tracing via [icecream-cpp](https://github.com/renatoGarcia/icecream-cpp) (single header, fetched at configure time by CMake `FetchContent`, pinned to v1.0.0). The `IC(...)` macro prints variable names + values (`op`, indices `(i,j,k)`, local tile coords, tile sizes) to **stderr**. All output sites are wrapped in `#ifdef COUT`; without it the program runs silently. Build it in a separate dir, e.g. `cmake -S . -B build-cout -DCOUT=ON`.
+
+**Residual check** is gated behind `-DCHECK=ON` (independent of `COUT`, off by default). When on, after the factorization the program prints one line per run: `CHECK: ... ||A - QR||_F / ||A||_F = <value>` (≈ machine epsilon when correct). Implemented in `residual_check.hpp` (gather to rank 0 + serial `Q·R` reconstruction). E.g. `cmake -S . -B build-check -DCHECK=ON`.
 
 ## Architecture
 

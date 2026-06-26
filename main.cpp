@@ -4,11 +4,16 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <vector>
 
 #ifdef COUT
 #include <icecream.hpp>
+#endif
+
+#ifdef CHECK
+#include "residual_check.hpp"
 #endif
 
 // Tile Algorithm による QR 分解 (PLASMA core カーネル + MPI 非同期通信)。
@@ -26,14 +31,31 @@ int main(int argc, char** argv)
 {
     MPI_Init(&argc, &argv);
 
-    int nprocs = 0;
+    int nprocs = 0, rank = 0;
     MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 
-    // 引数: global_m global_n ts ib [P Q]
-    const int global_m = (argc > 1) ? std::atoi(argv[1]) : 8;
-    const int global_n = (argc > 2) ? std::atoi(argv[2]) : 6;
-    const int ts       = (argc > 3) ? std::atoi(argv[3]) : 2;
-    const int ib       = (argc > 4) ? std::atoi(argv[4]) : 1;
+    // 引数: global_m global_n ts ib [P Q]  (前半4つは必須、P Q は対で任意)。
+    if (argc < 5 || argc == 6) {
+        if (rank == 0) {
+            std::fprintf(stderr,
+                "Usage: %s global_m global_n ts ib [P Q]\n"
+                "  global_m  大域行数 (要素, 必須)\n"
+                "  global_n  大域列数 (要素, 必須)\n"
+                "  ts        タイルサイズ = nb (必須)\n"
+                "  ib        内部ブロック, 0 < ib <= ts (必須)\n"
+                "  P Q       プロセスグリッド (任意, 対で指定; 既定 P=nprocs, Q=1; P*Q==nprocs)\n"
+                "例: mpirun -np 4 %s 5120 5120 128 32 2 2\n",
+                argv[0], argv[0]);
+        }
+        MPI_Finalize();
+        return 1;
+    }
+
+    const int global_m = std::atoi(argv[1]);
+    const int global_n = std::atoi(argv[2]);
+    const int ts       = std::atoi(argv[3]);
+    const int ib       = std::atoi(argv[4]);
     const int P        = (argc > 5) ? std::atoi(argv[5]) : nprocs;
     const int Q        = (argc > 6) ? std::atoi(argv[6]) : 1;
 
@@ -109,6 +131,11 @@ int main(int argc, char** argv)
             if (A.owner_col(j) == c) return true;
         return false;
     };
+
+#ifdef CHECK
+    // 因子化前の元行列を rank 0 へ集約 (残差の基準)。
+    const std::vector<double> A0 = tileqr::gather_tiles(A, false);
+#endif
 
     for (int k = 0; k < std::min(A.mt, A.nt); ++k) {
         const int pr = A.owner_row(k);
@@ -236,6 +263,20 @@ int main(int argc, char** argv)
             MPI_Waitall(static_cast<int>(trail_sends.size()), trail_sends.data(), MPI_STATUSES_IGNORE);
         for (int s = 0; s < A.nt; ++s) wait_req(top_back[s]);
     }
+
+#ifdef CHECK
+    // 因子化後の V(+R) と T を集約し、rank 0 で残差を計算。
+    {
+        const std::vector<double> Af = tileqr::gather_tiles(A, false);
+        const std::vector<double> Tf = tileqr::gather_tiles(A, true);
+        if (grid.rank == 0) {
+            const double res = tileqr::residual(A, A0, Af, Tf);
+            std::printf("CHECK: m=%d n=%d ts=%d ib=%d P=%d Q=%d  "
+                        "||A - QR||_F / ||A||_F = %.3e\n",
+                        global_m, global_n, ts, ib, P, Q, res);
+        }
+    }
+#endif
 
 #ifdef COUT
     // 検証: R の対角 (対角タイルの対角要素)。分散形状に依らず一致するはず。

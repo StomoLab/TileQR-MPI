@@ -3,6 +3,7 @@
 #include <plasma_core_blas.h>  // plasma_core_dgeqrt/dtsqrt/dormqr/dtsmqr (+ Plasma enums)
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -137,6 +138,10 @@ int main(int argc, char** argv)
     const std::vector<double> A0 = tileqr::gather_tiles(A, false);
 #endif
 
+    // 性能計測: 全ランクを揃えてから因子化の経過時間を測る。
+    MPI_Barrier(grid.comm);
+    const auto t_start = std::chrono::high_resolution_clock::now();
+
     for (int k = 0; k < std::min(A.mt, A.nt); ++k) {
         const int pr = A.owner_row(k);
         const int pc = A.owner_col(k);
@@ -262,6 +267,18 @@ int main(int argc, char** argv)
         if (!trail_sends.empty())
             MPI_Waitall(static_cast<int>(trail_sends.size()), trail_sends.data(), MPI_STATUSES_IGNORE);
         for (int s = 0; s < A.nt; ++s) wait_req(top_back[s]);
+    }
+
+    // 性能計測: 最後に同期をかけ、rank 0 のみで経過時間と GFLOPS を出力。
+    MPI_Barrier(grid.comm);
+    const auto t_end = std::chrono::high_resolution_clock::now();
+    if (grid.rank == 0) {
+        const double sec   = std::chrono::duration<double>(t_end - t_start).count();
+        const double n     = static_cast<double>(global_n);
+        const double flops = 4.0 / 3.0 * n * n * n;     // QR 演算量 (4/3 n^3)
+        const double gflops = flops / sec / 1.0e9;
+        std::printf("n,ts,ib,time,GFLOPS\n");
+        std::printf("%d,%d,%d,%.6f,%.3f\n", global_n, ts, ib, sec, gflops);
     }
 
 #ifdef CHECK
